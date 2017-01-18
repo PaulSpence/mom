@@ -480,7 +480,7 @@ use ocean_types_mod,        only: ocean_velocity_type, ocean_density_type
 use ocean_types_mod,        only: ocean_adv_vel_type, ocean_prog_tracer_type
 use ocean_types_mod,        only: ocean_lagrangian_type
 use ocean_util_mod,         only: write_timestamp, diagnose_2d, diagnose_2d_u, diagnose_2d_en, write_chksum_2d
-use ocean_workspace_mod,    only: wrk1_2d, wrk2_2d, wrk3_2d, wrk4_2d, wrk1_v2d, wrk2_v2d
+use ocean_workspace_mod,    only: wrk1_2d, wrk2_2d, wrk3_2d, wrk4_2d, wrk1_v2d, wrk2_v2d, wrk1_v
 
 implicit none
 
@@ -759,6 +759,7 @@ integer :: id_psx_bt             =-1
 integer :: id_psy_bt             =-1
 integer :: id_udrho_bt           =-1
 integer :: id_vdrho_bt           =-1
+integer :: id_press_force(2)     =-1
 
 integer :: id_eta_t_bt1          =-1
 integer :: id_anompb_bt1         =-1
@@ -887,6 +888,9 @@ logical                          :: use_legacy_barotropic_halos=.true.
 
 ! for geoid forcing  
 real, private, dimension(:,:), allocatable :: eta_geoid ! modified geoid (m)
+
+! for diagnosing the pressure force on a grid cell 
+real, allocatable, dimension(:,:,:) :: gridmask
 
 ! for tidal forcing 
 real :: alphat=0.948 ! ocean loading and self-attraction from tidal forcing
@@ -1038,7 +1042,7 @@ subroutine ocean_barotropic_init(Grid, Domain, Time, Time_steps, Ocean_options, 
   else 
     GRID_NE = CGRID_NE
   endif  
- 
+
   Dom => Domain
   Grd => Grid
   call set_ocean_domain(Dom_flux, Grid, name='horz diff flux', maskmap=Dom%maskmap)
@@ -1194,7 +1198,15 @@ subroutine ocean_barotropic_init(Grid, Domain, Time, Time_steps, Ocean_options, 
   p5grav_rho0r      = 0.5*grav*rho0r 
   dtbt_gamma        = dtbt*pred_corr_gamma
   dtbt_gamma_rho0r  = dtbt*pred_corr_gamma*rho0r
-  dtbt_rho0r        = dtbt*rho0r 
+  dtbt_rho0r        = dtbt*rho0r
+
+  allocate (gridmask(isd:ied,jsd:jed,nk))
+  if(horz_grid == MOM_BGRID) then 
+     gridmask(:,:,:) = Grd%umask(:,:,:)
+  else
+     gridmask(:,:,:) = Grd%tmask(:,:,:)
+  endif
+  
 
   if(barotropic_halo == 1 ) then
 
@@ -1931,6 +1943,16 @@ subroutine barotropic_diag_init(Time)
   id_psy  = register_diag_field ('ocean_model', 'psy', Grd%vel_axes_v(1:2),&
             Time%model_time, 'meridional surf pressure gradient', 'Pa/m',  &
             missing_value=missing_value, range=(/-1e9,1e9/))
+
+  ! barotropic u-pressure force applied to a grid cell 
+  id_press_force(1) = register_diag_field ('ocean_model', 'press_barotropic_force_u',            &
+     Grd%vel_axes_u(1:3), Time%model_time, 'i-directed barotropic pressure force on a grid cell',&
+     'Pa', missing_value=missing_value, range=(/-1e9,1e9/))
+
+  ! barotropic v-pressure force applied to a grid cell 
+  id_press_force(2) = register_diag_field ('ocean_model', 'press_barotropic_force_v',&
+     Grd%vel_axes_v(1:3), Time%model_time, 'j-directed barotropic pressure force on a grid cell',&
+     'Pa', missing_value=missing_value, range=(/-1e9,1e9/))
 
   id_eta_t_bt  = register_diag_field ('ocean_model', 'eta_t_bt', Grd%tracer_axes(1:2),     &
                  Time%model_time, 'surface height on T cells w/i barotropic loop', 'meter',&
@@ -2778,7 +2800,7 @@ subroutine update_ocean_barotropic (Time, Dens, Thickness, Adv_vel, &
   real, dimension(isd:ied,jsd:jed) :: psiv
   real                             :: rnts, rntsp1
   integer                          :: tau, taup1, itime 
-  integer                          :: i, j, n
+  integer                          :: i, j, k, n
   integer                          :: day, sec 
   real                             :: dayr    
 
@@ -2996,6 +3018,41 @@ subroutine update_ocean_barotropic (Time, Dens, Thickness, Adv_vel, &
   call diagnose_2d_en(Time, Grd, id_psx, id_psy, Ext_mode%grad_ps(:,:,:))
   call diagnose_2d(Time, Grd, id_pb, wrk1_2d(:,:))
   call diagnose_2d_en(Time, Grd, id_grad_anompbx, id_grad_anompby, Ext_mode%grad_anompb(:,:,:2))
+
+  if(id_press_force(1) > 0 .or.  id_press_force(2) > 0) then
+     wrk1_v = 0.0 
+     if(vert_coordinate_class==DEPTH_BASED) then
+        do n=1,2       
+           do k=1,nk  
+              do j=jsc,jec
+                 do i=isc,iec
+                    wrk1_v(i,j,k,n) = -Thickness%dzt(i,j,k)*Ext_mode%grad_ps(i,j,n)
+                 enddo
+              enddo            
+           enddo 
+        enddo              
+     else 
+        do n=1,2       
+           do k=1,nk  
+              do j=jsc,jec
+                 do i=isc,iec
+                    wrk1_v(i,j,k,n) = -rho0r*Thickness%rho_dzt(i,j,k,tau)*Ext_mode%grad_anompb(i,j,n)
+                 enddo
+              enddo            
+           enddo 
+        enddo              
+     endif
+     if (id_press_force(1) > 0) then 
+          used = send_data( id_press_force(1), wrk1_v(:,:,:,1), &
+          Time%model_time, rmask=gridmask(:,:,:),               &
+          is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=nk)
+     endif 
+     if (id_press_force(2) > 0) then 
+          used = send_data( id_press_force(2), wrk1_v(:,:,:,2), &
+          Time%model_time, rmask=gridmask(:,:,:),               &
+          is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=nk)
+     endif 
+  endif        
 
   ! compute barotropic energetics  
   next_time = increment_time(Time%model_time, int(dtts), 0)

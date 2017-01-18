@@ -1359,9 +1359,6 @@ subroutine lapgen_friction(Time, Thickness, Adv_vel, Velocity, &
       if (id_along > 0)  call diagnose_3d_u(Time, Grd, id_along,  aiso(:,:,:)+0.5*wrk1(:,:,:))
       if (id_across > 0) call diagnose_3d_u(Time, Grd, id_across, aiso(:,:,:)-0.5*wrk1(:,:,:))
 
-      call diagnose_3d_u(Time, Grd, id_lap_fric_u, wrk1_v(:,:,:,1))
-      call diagnose_3d_u(Time, Grd, id_lap_fric_v, wrk1_v(:,:,:,2))
-
       if (id_horz_lap_diss > 0) then 
           do k=1,nk
              do j=jsd,jed
@@ -1377,13 +1374,9 @@ subroutine lapgen_friction(Time, Thickness, Adv_vel, Velocity, &
 
       if(use_side_drag_friction) then 
          call diagnose_3d_u(Time, Grd, id_lap_fric_u, wrk3_v(:,:,:,1))
-      else 
-         call diagnose_3d_u(Time, Grd, id_lap_fric_u, wrk1_v(:,:,:,1))
-      endif
-
-      if(use_side_drag_friction) then 
          call diagnose_3d_u(Time, Grd, id_lap_fric_v, wrk3_v(:,:,:,2))
-      else 
+      else
+         call diagnose_3d_u(Time, Grd, id_lap_fric_u, wrk1_v(:,:,:,1))
          call diagnose_3d_u(Time, Grd, id_lap_fric_v, wrk1_v(:,:,:,2))
       endif
 

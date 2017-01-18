@@ -192,13 +192,17 @@ use ocean_velocity_advect_mod, only: horz_advection_of_velocity, vert_advection_
 use ocean_velocity_diag_mod,   only: kinetic_energy, potential_energy 
 use ocean_vert_mix_mod,        only: vert_friction_bgrid, vert_friction_implicit_bgrid
 use ocean_vert_mix_mod,        only: vert_friction_cgrid, vert_friction_implicit_cgrid
-use ocean_workspace_mod,       only: wrk1, wrk2, wrk3, wrk1_v  
+use ocean_workspace_mod,       only: wrk1, wrk2, wrk3, wrk1_v, wrk2_v
 
 implicit none
 
 private
 
 ! for diagnostics 
+integer :: id_momentum_change_u =-1
+integer :: id_momentum_change_v =-1
+integer :: id_momentum_advect_u =-1
+integer :: id_momentum_advect_v =-1
 integer :: id_u(2)              =-1
 integer :: id_u_on_depth(2)     =-1
 integer :: id_usurf(2)          =-1
@@ -238,6 +242,7 @@ logical :: have_obc = .false.
 #include <ocean_memory.h>
 
 real    :: dtime 
+real    :: dtime_r
 integer :: time_index 
 integer :: tendency
 
@@ -351,6 +356,7 @@ subroutine ocean_velocity_init (Grid, Domain, Time, Time_steps, Ocean_options, &
   have_obc  = obc
   tendency  = Time_steps%tendency
   dtime     = Time_steps%dtime_u
+  dtime_r   = 1.0/dtime 
   horz_grid = hor_grid 
 
   ! provide for namelist over-ride of defaults 
@@ -439,6 +445,20 @@ subroutine ocean_velocity_init (Grid, Domain, Time, Time_steps, Ocean_options, &
   Velocity%current_wave_stress = 0.0
 
   ! register fields for diagnostic output
+
+  id_momentum_change_u = register_diag_field ('ocean_model', 'momentum_change_u', Grd%vel_axes_u(1:3),&
+   Time%model_time,'i-momentum change over a single time step', 'N/m^2', missing_value=missing_value, &
+   range=(/-1e12,1e12/))
+  id_momentum_change_v = register_diag_field ('ocean_model', 'momentum_change_v', Grd%vel_axes_u(1:3),&
+   Time%model_time,'j-momentum change over a single time step', 'N/m^2', missing_value=missing_value, &
+   range=(/-1e12,1e12/))
+
+  id_momentum_advect_u = register_diag_field ('ocean_model', 'momentum_advect_u', Grd%vel_axes_u(1:3),&
+   Time%model_time,'i-momentum advection contributing to momentum update', 'N/m^2',                   &
+   missing_value=missing_value, range=(/-1e12,1e12/))
+  id_momentum_advect_v = register_diag_field ('ocean_model', 'momentum_advect_v', Grd%vel_axes_u(1:3),&
+   Time%model_time,'j-momentum advection contributing to momentum update', 'N/m^2',                   &
+   missing_value=missing_value, range=(/-1e12,1e12/))
 
   id_u(1)    = register_diag_field ('ocean_model', 'u', Grd%vel_axes_u(1:3), Time%model_time, &
      'i-current', 'm/sec', missing_value=missing_value, range=(/-10.0,10.0/),                 &
@@ -946,7 +966,8 @@ subroutine ocean_explicit_accel_a(Velocity, Time, Adv_vel, Thickness, Dens, &
               Velocity%source(i,j,k,n)           = 0.0 
               Velocity%press_force(i,j,k,n)      = 0.0 
               Velocity%advection(i,j,k,n,tau_m0) = 0.0 
-              Velocity%coriolis(i,j,k,n,tau_m0)  = 0.0 
+              Velocity%coriolis(i,j,k,n,tau_m0)  = 0.0
+              wrk1_v(i,j,k,n)                    = 0.0    
            enddo
         enddo
      enddo
@@ -965,7 +986,8 @@ subroutine ocean_explicit_accel_a(Velocity, Time, Adv_vel, Thickness, Dens, &
                do i=isc,iec
                   Velocity%accel(i,j,k,n) = -abtau_m0*Velocity%advection(i,j,k,n,tau_m0) & 
                                             -abtau_m1*Velocity%advection(i,j,k,n,tau_m1) & 
-                                            -abtau_m2*Velocity%advection(i,j,k,n,tau_m2)  
+                                            -abtau_m2*Velocity%advection(i,j,k,n,tau_m2)
+                  wrk1_v(i,j,k,n)         =  Velocity%accel(i,j,k,n) 
                enddo
             enddo
          enddo
@@ -993,6 +1015,14 @@ subroutine ocean_explicit_accel_a(Velocity, Time, Adv_vel, Thickness, Dens, &
       ! compute parameterized form drag and add to Velocity%accel 
       call form_drag_accel(Time, Thickness, Velocity, energy_analysis_step=.false.)
 
+  endif
+
+  if(horz_grid == MOM_BGRID) then 
+     call diagnose_3d_u(Time, Grd, id_momentum_advect_u, wrk1_v(:,:,:,1))
+     call diagnose_3d_u(Time, Grd, id_momentum_advect_v, wrk1_v(:,:,:,2))
+  else
+     call diagnose_3d(Time, Grd, id_momentum_advect_u, wrk1_v(:,:,:,1))
+     call diagnose_3d(Time, Grd, id_momentum_advect_v, wrk1_v(:,:,:,2))
   endif
 
   if (debug_this_module) then
@@ -1389,6 +1419,22 @@ subroutine update_ocean_velocity_bgrid(Time, Thickness, barotropic_split, &
     call remap_s_to_depth(Thickness, Time, Velocity%u(:,:,:,2,tau), 2)
   endif 
 
+  ! diagnose the time step change for momentum per area (N/m2) within a grid cell
+  if(id_momentum_change_u > 0 .or. id_momentum_change_v > 0) then
+     wrk1_v(:,:,:,:) = 0.0
+     do n=1,2
+        do k=1,nk 
+           do j=jsc,jec
+              do i=isc,iec
+                 wrk1_v(i,j,k,n) =  (Velocity%u(i,j,k,n,taup1)*Thickness%rho_dzu(i,j,k,taup1) &
+                                    -Velocity%u(i,j,k,n,taum1)*Thickness%rho_dzu(i,j,k,taum1))*dtime_r 
+              enddo
+           enddo
+        enddo   
+     enddo
+     call diagnose_3d_u(Time, Grd, id_momentum_change_u, wrk1_v(:,:,:,1))
+     call diagnose_3d_u(Time, Grd, id_momentum_change_v, wrk1_v(:,:,:,2))
+  endif 
 
 end subroutine update_ocean_velocity_bgrid
 ! </SUBROUTINE> NAME="update_ocean_velocity_bgrid"
@@ -1430,10 +1476,11 @@ subroutine update_ocean_velocity_cgrid(Time, Thickness, Adv_vel, Ext_mode, Veloc
   integer :: stdoutunit 
   stdoutunit=stdout() 
 
-  taum1 = Time%taum1
-  tau   = Time%tau
-  taup1 = Time%taup1
-  tmp   = 0.0
+  taum1  = Time%taum1
+  tau    = Time%tau
+  taup1  = Time%taup1
+  tmp    = 0.0
+  wrk2_v = 0.0 
 
   do n=1,2
 
@@ -1443,6 +1490,7 @@ subroutine update_ocean_velocity_cgrid(Time, Thickness, Adv_vel, Ext_mode, Veloc
            do i=isc,iec
               rho_dz_vel_tau = (2-n)*Adv_vel%uhrho_et(i,j,k)*Grd%dxte_dxtr(i,j)*Grd%dyte_dytr(i,j) &
                               +(n-1)*Adv_vel%vhrho_nt(i,j,k)*Grd%dxtn_dxtr(i,j)*Grd%dytn_dytr(i,j)
+              wrk2_v(i,j,k,n) = rho_dz_vel_tau 
               Velocity%u(i,j,k,n,taup1) = Grd%tmasken(i,j,k,n)*(rho_dz_vel_tau + dtime*Velocity%accel(i,j,k,n)*Grd%tmasken(i,j,k,n)) &
                                           /(epsln + Thickness%rho_dzten(i,j,k,n))                
            enddo
@@ -1597,6 +1645,22 @@ subroutine update_ocean_velocity_cgrid(Time, Thickness, Adv_vel, Ext_mode, Veloc
     call remap_s_to_depth(Thickness, Time, Velocity%u(:,:,:,2,tau), 2)
   endif 
 
+  ! diagnose the time step change for momentum per area (N/m2) 
+  if(id_momentum_change_u > 0 .or. id_momentum_change_v > 0) then
+     wrk1_v(:,:,:,:) = 0.0
+     do n=1,2
+        do k=1,nk 
+           do j=jsc,jec
+              do i=isc,iec
+                 wrk1_v(i,j,k,n) = (Velocity%u(i,j,k,n,taup1)*Thickness%rho_dzten(i,j,k,n)-wrk2_v(i,j,k,n))*dtime_r 
+              enddo
+           enddo
+        enddo   
+     enddo
+     call diagnose_3d(Time, Grd, id_momentum_change_u, wrk1_v(:,:,:,1))
+     call diagnose_3d(Time, Grd, id_momentum_change_v, wrk1_v(:,:,:,2))
+  endif 
+  
 
 end subroutine update_ocean_velocity_cgrid
 ! </SUBROUTINE> NAME="update_ocean_velocity_cgrid"
