@@ -93,6 +93,12 @@ integer :: id_uz_trans       =-1
 integer :: id_tx_trans_rho=-1
 integer :: id_ty_trans_rho=-1
 
+!Paul - light to dens
+integer :: id_ty_trans_l2drho=-1
+integer :: id_ty_trans_d2lrho=-1
+integer :: id_ty_trans_l2d=-1
+integer :: id_ty_trans_d2l=-1
+
 ! for transport_on_nrho
 integer :: id_tx_trans_nrho=-1
 integer :: id_ty_trans_nrho=-1
@@ -236,6 +242,17 @@ id_ty_trans = register_diag_field ('ocean_model','ty_trans', Grd%tracer_axes_flu
               Time%model_time, 'T-cell j-mass transport',trim(transport_dims),            &
               missing_value=missing_value, range=(/-1e20,1e20/),                          &
               standard_name='ocean_y_mass_transport')
+
+id_ty_trans_l2d = register_diag_field ('ocean_model','ty_trans_l2d', Grd%tracer_axes_flux_y(1:3), &
+              Time%model_time, 'T-cell j-mass transport l2d',trim(transport_dims),            &
+              missing_value=missing_value, range=(/-1e20,1e20/),                          &
+              standard_name='ocean_y_mass_transport')
+
+id_ty_trans_d2l = register_diag_field ('ocean_model','ty_trans_d2l', Grd%tracer_axes_flux_y(1:3), &
+              Time%model_time, 'T-cell j-mass transport d2l',trim(transport_dims),            &
+              missing_value=missing_value, range=(/-1e20,1e20/),                          &
+              standard_name='ocean_y_mass_transport')
+
 id_tx_trans_int_z = register_diag_field ('ocean_model','tx_trans_int_z',        &
               Grd%tracer_axes_flux_x(1:2), Time%model_time,                     &
               'T-cell i-mass transport vertically summed',trim(transport_dims), &
@@ -274,6 +291,14 @@ id_tx_trans_rho = register_diag_field ('ocean_model','tx_trans_rho', Dens%potrho
                   missing_value=missing_value, range=(/-1e20,1e20/))
 id_ty_trans_rho = register_diag_field ('ocean_model','ty_trans_rho', Dens%potrho_axes_flux_y(1:3),&
                   Time%model_time, 'T-cell j-mass transport on pot_rho',trim(transport_dims),     &
+                  missing_value=missing_value, range=(/-1e20,1e20/))
+
+id_ty_trans_l2drho = register_diag_field ('ocean_model','ty_trans_l2drho', Dens%potrho_axes_flux_y(1:3),&
+                  Time%model_time, 'T-cell j-mass l2d transport on pot_rho',trim(transport_dims),     &
+                  missing_value=missing_value, range=(/-1e20,1e20/))
+
+id_ty_trans_d2lrho = register_diag_field ('ocean_model','ty_trans_d2lrho', Dens%potrho_axes_flux_y(1:3),&
+                  Time%model_time, 'T-cell j-mass d2l transport on pot_rho',trim(transport_dims),     &
                   missing_value=missing_value, range=(/-1e20,1e20/))
 
 id_tx_trans_nrho = register_diag_field ('ocean_model','tx_trans_nrho', Dens%neutralrho_axes_flux_x(1:3),&
@@ -334,7 +359,7 @@ subroutine ocean_adv_vel_diagnostics(Time, Thickness, Adv_vel, T_prog, Dens, vis
   call mpp_clock_end(id_adv_vel_numerics)
   
   call mpp_clock_begin(id_transport_on_s)
-    call transport_on_s(Time, Adv_vel)
+    call transport_on_s(Time, Dens, Adv_vel)
   call mpp_clock_end(id_transport_on_s)
 
   call mpp_clock_begin(id_transport_on_rho)
@@ -826,9 +851,10 @@ end subroutine max_continuity_error
 ! and send to diag_manager.
 ! </DESCRIPTION>
 !
-subroutine transport_on_s(Time, Adv_vel)
+subroutine transport_on_s(Time, Dens, Adv_vel)
 
   type(ocean_time_type),    intent(in) :: Time
+  type(ocean_density_type), intent(in) :: Dens
   type(ocean_adv_vel_type), intent(in) :: Adv_vel
   integer :: i, j, k
   
@@ -871,7 +897,57 @@ subroutine transport_on_s(Time, Adv_vel)
       enddo
     enddo 
     call diagnose_3d(Time, Grd, id_ty_trans, wrk1(:,:,:))
+  endif
+
+  !Paul l2d
+  if (id_ty_trans_l2d > 0) then 
+    do k=1,nk
+      do j=jsc,jec
+         do i=isc,iec
+            !wrk1(i,j,k) = Adv_vel%vhrho_nt(i,j,k)*Grd%dxtn(i,j)*transport_convert 
+            !if vel is northward
+            ! rho*dzu * advect vel (kg/(m*s)) on j-face of T-cell
+            if(Adv_vel%vhrho_nt(i,j,k)>0) then
+               if( Dens%potrho(i,j,k) < Dens%potrho(i,j+1,k)) then   
+                  !wrk1(i,j,k) = Adv_vel%vhrho_nt(i,j,k)*Grd%dxtn(i,j)*transport_convert 
+                  wrk1(i,j,k) = 1.0 
+               endif
+            else !if vel is southward
+               if( Dens%potrho(i,j,k) < Dens%potrho(i,j-1,k)) then   
+                  wrk1(i,j,k) = -1.0 
+                  !wrk1(i,j,k) = Adv_vel%vhrho_nt(i,j,k)*Grd%dxtn(i,j)*transport_convert 
+               endif
+            endif
+         enddo 
+      enddo
+    enddo 
+    call diagnose_3d(Time, Grd, id_ty_trans_l2d, wrk1(:,:,:))
   endif 
+ 
+  !Paul d2l
+  if (id_ty_trans_d2l > 0) then 
+    do k=1,nk
+      do j=jsc,jec
+         do i=isc,iec
+            wrk1(i,j,k) = Adv_vel%vhrho_nt(i,j,k)*Grd%dxtn(i,j)*transport_convert 
+            !if vel is northward
+            if(Adv_vel%vhrho_nt(i,j,k)>0) then
+               if( Dens%potrho(i,j,k) >= Dens%potrho(i,j+1,k)) then   
+                  !wrk1(i,j,k) = Adv_vel%vhrho_nt(i,j,k)*Grd%dxtn(i,j)*transport_convert 
+                  wrk1(i,j,k) = 1.0 
+               endif
+            else !if vel is southward
+               if( Dens%potrho(i,j,k) >= Dens%potrho(i,j-1,k)) then   
+                  !wrk1(i,j,k) = Adv_vel%vhrho_nt(i,j,k)*Grd%dxtn(i,j)*transport_convert 
+                  wrk1(i,j,k) = -1.0 
+               endif
+            endif
+         enddo 
+      enddo
+    enddo 
+    call diagnose_3d(Time, Grd, id_ty_trans_d2l, wrk1(:,:,:))
+  endif 
+ 
   if (id_ty_trans_int_z > 0) then 
       wrk1_2d(:,:) = 0.0
       do k=1,nk
@@ -1161,6 +1237,104 @@ subroutine transport_on_rho (Time, Dens, Adv_vel)
       endif
       if (id_ty_trans_rho > 0) then 
           used = send_data (id_ty_trans_rho, work2, Time%model_time, &
+                            ks_in=1, ke_in=potrho_nk)
+      endif
+
+  endif
+
+  !calc l2d and d2l Paul
+  if (need_data(id_ty_trans_d2lrho,next_time) .or. need_data(id_ty_trans_l2drho,next_time)) then
+
+      work1(:,:,:) = 0.0
+      work2(:,:,:) = 0.0
+
+      do k_rho=1,potrho_nk
+         !tmp(1 is l2d tmp(2 is d2l
+         tmp(:,:,:) = 0.0
+         do k=1,nk
+            do j=jsc,jec
+               do i=isc,iec
+                  if (k_rho == 1) then
+                     !if density in this cell is below mininum range
+                     !bin the transport in bottom most bin  
+                     if(Dens%potrho(i,j,k) < Dens%potrho_bounds(k_rho)) then 
+                        !if vel is northward
+                        if(Adv_vel%vhrho_nt(i,j,k)>0) then
+                           if( Dens%potrho(i,j,k) < Dens%potrho(i,j+1,k)) then   
+                             tmp(1,i,j) = tmp(1,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                           else
+                             tmp(2,i,j) = tmp(2,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                           endif
+                        else !if vel is southward
+                           if( Dens%potrho(i,j,k) < Dens%potrho(i,j-1,k)) then   
+                             tmp(1,i,j) = tmp(1,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                           else
+                             tmp(2,i,j) = tmp(2,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                           endif
+                        endif
+                     endif
+                  elseif(k_rho < potrho_nk) then 
+                     if( (Dens%potrho_bounds(k_rho) <= Dens%potrho(i,j,k)) .and. &
+                         (Dens%potrho(i,j,k)        <  Dens%potrho_bounds(k_rho+1)) ) then 
+                        !if density in this cell is below mininum range
+                        !bin the transport in bottom most bin  
+                        if(Dens%potrho(i,j,k) < Dens%potrho_bounds(k_rho)) then 
+                           !if vel is northward
+                           if(Adv_vel%vhrho_nt(i,j,k)>0) then
+                              if( Dens%potrho(i,j,k) < Dens%potrho(i,j+1,k)) then   
+                                tmp(1,i,j) = tmp(1,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                              else
+                                tmp(2,i,j) = tmp(2,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                              endif
+                           else !if vel is southward
+                              if( Dens%potrho(i,j,k) < Dens%potrho(i,j-1,k)) then   
+                                tmp(1,i,j) = tmp(1,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                              else
+                                tmp(2,i,j) = tmp(2,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                              endif
+                           endif
+                        endif
+                     endif
+                  else  ! if (k_rho == potrho_nk) then
+                     if(Dens%potrho_bounds(k_rho) <= Dens%potrho(i,j,k)) then 
+                        !if density in this cell is below mininum range
+                        !bin the transport in bottom most bin  
+                        if(Dens%potrho(i,j,k) < Dens%potrho_bounds(k_rho)) then 
+                           !if vel is northward
+                           if(Adv_vel%vhrho_nt(i,j,k)>0) then
+                              if( Dens%potrho(i,j,k) < Dens%potrho(i,j+1,k)) then   
+                                tmp(1,i,j) = tmp(1,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                              else
+                                tmp(2,i,j) = tmp(2,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                              endif
+                           else !if vel is southward
+                              if( Dens%potrho(i,j,k) < Dens%potrho(i,j-1,k)) then   
+                                tmp(1,i,j) = tmp(1,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                              else
+                                tmp(2,i,j) = tmp(2,i,j) + Adv_vel%vhrho_nt(i,j,k)
+                              endif
+                           endif
+                        endif
+                     endif
+                  endif
+               enddo
+            enddo
+         enddo
+
+         do j=jsc,jec
+            do i=isc,iec
+               work1(i,j,k_rho) = (tmp(1,i,j)+work1(i,j,k_rho))*Grd%dyte(i,j)*transport_convert*Grd%tmask(i,j,1)
+               work2(i,j,k_rho) = (tmp(2,i,j)+work2(i,j,k_rho))*Grd%dxtn(i,j)*transport_convert*Grd%tmask(i,j,1)
+            enddo
+         enddo
+      enddo
+
+      if (id_ty_trans_l2drho > 0) then 
+          used = send_data (id_ty_trans_l2drho, work1, Time%model_time, &
+                            ks_in=1, ke_in=potrho_nk)
+      endif
+      if (id_ty_trans_d2lrho > 0) then 
+          used = send_data (id_ty_trans_d2lrho, work2, Time%model_time, &
                             ks_in=1, ke_in=potrho_nk)
       endif
 
